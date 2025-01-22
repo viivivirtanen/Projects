@@ -1,0 +1,478 @@
+ #include <Wire.h>
+#include "bmm150.h"
+#include "bmm150_defs.h"
+#include <LiquidCrystal.h>
+#include <math.h>
+
+
+// Motor control definitions
+#define Motor_forward         1  // Direction, forward
+#define Motor_backward        0  // Direction, backward
+#define Motor_L_dir_pin       7  // Left motor direction pin
+#define Motor_R_dir_pin       8  // Right motor direction pin
+#define Motor_L_pwm_pin       9  // Left motor PWM pin
+#define Motor_R_pwm_pin       10 // Right motor PWM pin
+
+// LCD setup
+const int rs = 37, e = 36, d4 = 35, d5 = 34, d6 = 33, d7 = 32;
+LiquidCrystal lcd(rs, e, d4, d5, d6, d7);  
+
+// Compass setup
+BMM150 bmm = BMM150(); 
+const int tolerance = 10; // Heading tolerance
+
+// Joystick input pins
+const int inPinx = A8;
+const int inPiny = A9;
+const int buttonPin = 19;
+
+volatile int mode = 0;  // Control mode: 0 for Joystick, 1 for Web Control
+volatile int buttonState = 0;
+String currentMode = "Joystick";
+volatile int count = 0; // Button counter
+
+
+// Encoder pins
+const int ENCA_L = 2; // Left encoder pin
+const int ENCA_R = 3; // Right encoder pin
+volatile long encoderCountL = 0;
+volatile long encoderCountR = 0;
+
+String serialCommand = "";  // Storing the serial command
+
+// Distance configuration
+float pulsesPerCm_L = 13.9; // Pulses for the left encoder
+float pulsesPerCm_R = 13.9; // Pulses for the right encoder
+
+// Function prototypes
+void driveToDistance(int distanceCm, bool forward);
+void adjustHeading(int relativeDegree);
+void findNorth();
+void helpFindNorth(int relativeDegree);
+void rotateClockwise(int speed);
+void rotateCounterClockwise(int speed);
+void stopMotors();
+float getCurrentHeading();
+int getRotationSpeed(float heading, float target);
+void carControl(int x, int y);
+String getDirection(float degrees);
+void processWebCommand(String command);
+void encoderISR_L();
+void encoderISR_R();
+void my_ISR();
+
+// Setup function
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();  // Initialize I2C communication
+
+  // LCD setup
+  lcd.begin(20, 4);
+
+  attachInterrupt(digitalPinToInterrupt(buttonPin), my_ISR, FALLING);
+
+  // Joystick pin setup
+  pinMode(inPinx, INPUT);
+  pinMode(inPiny, INPUT); 
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  // Motor pins setup
+  pinMode(Motor_L_dir_pin, OUTPUT);
+  pinMode(Motor_R_dir_pin, OUTPUT);
+  pinMode(Motor_L_pwm_pin, OUTPUT);
+  pinMode(Motor_R_pwm_pin, OUTPUT);
+
+  // Encoder pins setup
+  pinMode(ENCA_L, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ENCA_L), encoderISR_L, RISING);
+  pinMode(ENCA_R, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ENCA_R), encoderISR_R, RISING);
+
+  // Initialize compass
+  if (bmm.initialize() == BMM150_E_ID_NOT_CONFORM) {
+    Serial.println("Error: Unable to read compass ID!");
+    while (1);
+  } else {
+    Serial.println("Compass initialized successfully.");
+  }
+}
+
+void loop() {
+  // Reading compass data
+   bmm.read_mag_data();
+
+    // Retrieve raw magnetic values
+    int16_t x = bmm.raw_mag_data.raw_datax;
+    int16_t y = bmm.raw_mag_data.raw_datay;
+    int16_t z = bmm.raw_mag_data.raw_dataz;
+    int16_t adjustedX = x;  
+    int16_t adjustedY = -y; 
+
+    // Heading in degrees
+    float headingRadians = atan2(adjustedY, adjustedX);
+    float headingDegrees = headingRadians * 180 / M_PI;
+    if (headingDegrees < 0) {
+        headingDegrees += 360;
+    }
+
+    // Mode on LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Mode: ");
+    if (mode == 0) { // Joystick mode
+        int xValue = analogRead(inPinx); 
+        int yValue = analogRead(inPiny); 
+        carControl(xValue, yValue);
+
+        lcd.print("Joystick Mode");
+        lcd.setCursor(0, 1);
+        lcd.print("X: ");
+        lcd.print(xValue);
+        lcd.setCursor(0, 2);
+        lcd.print("Y: ");
+        lcd.print(yValue);
+    } else if (mode == 1) { // Web Control mode
+        if (Serial.available() > 0) {
+            serialCommand = Serial.readStringUntil('\n');
+            serialCommand.trim();  // Remove any whitespace
+            processWebCommand(serialCommand);
+        }
+
+        lcd.print("Web Control");
+        lcd.setCursor(0, 1);
+        lcd.print("Cmd: ");
+        lcd.setCursor(5, 2);
+        lcd.print(serialCommand);
+    }
+
+    // Update compass heading
+    String direction = getDirection(headingDegrees); 
+    lcd.setCursor(0, 3);
+    lcd.print("Bearing: ");
+    lcd.print(headingDegrees, 1);
+    lcd.print(" ");
+    lcd.print(direction);
+
+    if (mode == 0) {
+        int a1Result = analogRead(inPinx); 
+        int a2Result = analogRead(inPiny); 
+        carControl(a1Result, a2Result);
+    }
+
+    if (Serial.available() > 0) {
+        serialCommand = Serial.readStringUntil('\n');
+        serialCommand.trim();
+
+        // Debugging: Print received command
+        Serial.print("Received Command: ");
+        Serial.println(serialCommand);
+
+        processWebCommand(serialCommand);
+    }
+
+  
+  delay(50);
+}
+
+void processWebCommand(String command) {
+  // Debugging: Print the command being processed
+  Serial.print("Processing Command: ");
+  Serial.println(command);
+
+ 
+  if (command.startsWith("Move:")) {
+    int distance = command.substring(5).toInt();
+    Serial.print("Moving distance: ");
+    Serial.println(distance);
+    driveToDistance(abs(distance), distance >= 0);
+  } 
+  else if (command.startsWith("Turn:")) {
+    int relativeDegree = command.substring(5).toInt();
+    Serial.print("Turning degrees: ");
+    Serial.println(relativeDegree);
+    adjustHeading(relativeDegree);
+  } 
+  else if (command == "find:North") {
+    Serial.println("Finding North");
+    findNorth();
+  } 
+  else {
+    Serial.println("Unknown command");
+  }
+}
+
+
+void carControl(int x, int y) {
+  int neutral = 512; // Center value for joystick
+  int DZ = 20;       // Dead zone for neutral position
+
+  // Calculate speed (based on Y-axis)
+  int speed = map(abs(y - neutral), 0, 512, 0, 255);
+
+  // Calculate turn factor (based on X-axis)
+  int turn = map(x - neutral, -512, 512, -255, 255); // Negative = left, Positive = right
+
+  // Dead zone check
+  if (abs(x - neutral) < DZ && abs(y - neutral) < DZ) {
+    analogWrite(Motor_L_pwm_pin, 0);
+    analogWrite(Motor_R_pwm_pin, 0);
+    return;
+  }
+
+  // Forward/Backward movement (Y-axis)
+  if (y > neutral) {
+    digitalWrite(Motor_L_dir_pin, Motor_forward);
+    digitalWrite(Motor_R_dir_pin, Motor_forward);
+  } else {
+    digitalWrite(Motor_L_dir_pin, Motor_backward);
+    digitalWrite(Motor_R_dir_pin, Motor_backward);
+  }
+
+  // Calculate motor speeds for turning
+  int leftSpeed = constrain(speed + turn, 0, 255);  
+  int rightSpeed = constrain(speed - turn, 0, 255); 
+
+  // Set motor speeds
+  analogWrite(Motor_L_pwm_pin, leftSpeed);
+  analogWrite(Motor_R_pwm_pin, rightSpeed);
+}
+
+// Get the direction based on the compass value
+String getDirection(float degrees) {
+  if ((degrees >= 337.5) || (degrees < 22.5)) {
+    return "N";
+  } else if (degrees < 67.5) {
+    return "NE";
+  } else if (degrees < 112.5) {
+    return "E";
+  } else if (degrees < 157.5) {
+    return "SE";
+  } else if (degrees < 202.5) {
+    return "S";
+  } else if (degrees < 247.5) {
+    return "SW";
+  } else if (degrees < 292.5) {
+    return "W";
+  } else if (degrees < 337.5) {
+    return "NW";
+  }
+  return "";
+}
+
+// Function to find North
+void findNorth() {
+  Serial.println("Finding North - Start");
+
+  // Get the current heading from the compass
+  float currentHeading = getCurrentHeading();
+
+  // Calculate the rotation needed to face North (0 degrees)
+  float rotationNeeded = -currentHeading;
+
+  // Ensure the rotationNeeded is in the correct range (-360 to 360)
+  if (rotationNeeded > 180) {
+    rotationNeeded -= 360;
+  } else if (rotationNeeded < -180) {
+    rotationNeeded += 360;
+  }
+
+  Serial.print("Current Heading: ");
+  Serial.println(currentHeading);
+  Serial.print("Rotation Needed to Face North: ");
+  Serial.println(rotationNeeded);
+
+  // Use helpFindNorth function to rotate to the calculated heading
+  helpFindNorth(rotationNeeded);
+
+  Serial.println("Finding North - Complete");
+}
+
+void helpFindNorth(int relativeDegree) {
+  float currentHeading = getCurrentHeading(); // Get the current heading
+  float targetHeading = fmod((currentHeading + relativeDegree + 360), 360);  // Calculate the target heading
+
+  if (targetHeading < 0) targetHeading += 360;  // Ensure targetHeading is always positive
+  
+  Serial.print("Adjusting Heading: ");
+  Serial.print("Current: ");
+  Serial.print(currentHeading);
+  Serial.print(" Target: ");
+  Serial.println(targetHeading);
+
+  while (true) {
+    float nowHeading = getCurrentHeading();  // Get the current heading
+    float diff = fmod((targetHeading - nowHeading + 360), 360);  // Difference between current and target
+
+    // Handle negative rotations properly for larger ranges
+    if (relativeDegree > 0) {  // Positive rotation (clockwise)
+      if (diff < 0) diff += 360;  // Ensure positive difference
+    } else if (relativeDegree < 0) {  // Negative rotation (counterclockwise)
+      if (diff > 0) diff -= 360;  // Ensure negative difference
+    }
+
+    Serial.print("Current Heading: ");
+    Serial.print(nowHeading);
+    Serial.print(" Diff: ");
+    Serial.println(diff);
+
+    // Stop when within tolerance
+    if (abs(diff) <= tolerance) {
+      Serial.println("Heading adjustment complete.");
+      break;
+    }
+
+    // Rotate based on the sign of the difference
+    if (relativeDegree > 0) {
+      rotateClockwise(getRotationSpeed(nowHeading, targetHeading));
+    } else if (relativeDegree<0) {
+      rotateCounterClockwise(getRotationSpeed(nowHeading, targetHeading));
+    }
+
+    delay(50);
+  }
+
+  stopMotors();  // Stop the motors after the adjustment
+  lcd.clear();
+  lcd.print("Turn complete");
+}
+
+void adjustHeading(int relativeDegree) {
+  float currentHeading = getCurrentHeading(); // Get the current heading
+  float targetHeading;
+
+  // Determine the target heading
+  if (relativeDegree > 0) { // Turn right
+    if (currentHeading - relativeDegree >= 0) {
+      targetHeading = currentHeading - relativeDegree;
+    } else {
+      targetHeading = currentHeading - relativeDegree + 360;
+    }
+  } else if (relativeDegree < 0) { // Turn left
+    if (currentHeading - relativeDegree < 360) {
+      targetHeading = currentHeading - relativeDegree;
+    } else {
+      targetHeading = currentHeading - relativeDegree - 360;
+    }
+  } else {
+    Serial.println("No adjustment needed. Relative degree is 0.");
+    return;
+  }
+
+  // Debug: Print target calculation
+  Serial.print("Relative Degree: ");
+  Serial.print(relativeDegree);
+  Serial.print(" Current Heading: ");
+  Serial.print(currentHeading);
+  Serial.print(" Target Heading: ");
+  Serial.println(targetHeading);
+
+  // Rotate until currentHeading matches targetHeading
+  while (true) {
+    float nowHeading = getCurrentHeading();
+
+    // Debug: Print current heading
+    Serial.print("Current Heading: ");
+    Serial.println(nowHeading);
+
+    // Stop if current heading matches the target heading within tolerance
+    if (abs(nowHeading - targetHeading) <= 2.0) {
+      Serial.println("Heading adjustment complete.");
+      break;
+    }
+
+    // Rotate in the direction specified by relativeDegree
+    if (relativeDegree > 0) {
+      rotateClockwise(100); // Turn right
+    } else if (relativeDegree < 0) {
+      rotateCounterClockwise(100); // Turn left
+    }
+
+    delay(50); // Delay to allow for stable adjustments
+  }
+
+  stopMotors(); // Stop the motors after adjustment
+}
+
+
+
+
+// Drive to a specific distance
+void driveToDistance(int distanceCm, bool forward) {
+  encoderCountL = 0; 
+  encoderCountR = 0;
+
+  digitalWrite(Motor_L_dir_pin, forward ? Motor_forward : Motor_backward);
+  digitalWrite(Motor_R_dir_pin, forward ? Motor_forward : Motor_backward);
+
+  long targetPulsesL = distanceCm * pulsesPerCm_L;
+  long targetPulsesR = distanceCm * pulsesPerCm_R;
+
+  analogWrite(Motor_L_pwm_pin, 100);
+  analogWrite(Motor_R_pwm_pin, 100);
+
+  while (encoderCountL < targetPulsesL || encoderCountR < targetPulsesR) {
+    lcd.setCursor(0, 1);
+    lcd.print("L: ");
+    lcd.print(encoderCountL);
+    lcd.print(" R: ");
+    lcd.print(encoderCountR);
+    delay(50);
+  }
+
+  stopMotors();
+  lcd.clear();
+  lcd.print("Target reached!");
+}
+
+// Get current heading from the compass
+float getCurrentHeading() {
+  bmm.read_mag_data();
+  float headingRadians = atan2(bmm.raw_mag_data.raw_datay, bmm.raw_mag_data.raw_datax);
+  float headingDegrees = headingRadians * 180 / M_PI;
+  if (headingDegrees < 0) headingDegrees += 360;
+  return headingDegrees;
+}
+
+// Adjust rotation speed based on the degree of rotation
+int getRotationSpeed(float heading, float target) {
+  float distance = abs(heading - target);
+  if (distance <= 10) return 20;   // Speed 20 when under 10 degrees away from target
+  if (distance <= 40) return 40;   // Speed 40 when under 40 degrees away from target
+  return 120;  // Higher speed for larger rotations
+}
+
+
+// Rotate clockwise at a given speed
+void rotateClockwise(int speed) {
+  digitalWrite(Motor_L_dir_pin, LOW);
+  digitalWrite(Motor_R_dir_pin, HIGH);
+  analogWrite(Motor_L_pwm_pin, 50);
+  analogWrite(Motor_R_pwm_pin, 50);
+}
+
+// Rotate counterclockwise at a given speed
+void rotateCounterClockwise(int speed) {
+  digitalWrite(Motor_L_dir_pin, HIGH);
+  digitalWrite(Motor_R_dir_pin, LOW);
+  analogWrite(Motor_L_pwm_pin, 50);
+  analogWrite(Motor_R_pwm_pin, 50);
+}
+
+// Stop the motors
+void stopMotors() {
+  analogWrite(Motor_L_pwm_pin, 0);
+  analogWrite(Motor_R_pwm_pin, 0);
+  delay(100);
+}
+
+void my_ISR() {
+  // Toggle mode between Joystick and Web Control
+  mode = (mode == 0) ? 1 : 0;
+  currentMode = (mode == 0) ? "Joystick" : "Web Control";
+  count++;
+}
+
+
+// Interrupt Service Routines for encoders
+void encoderISR_L() { encoderCountL++; }
+void encoderISR_R() { encoderCountR++; }
