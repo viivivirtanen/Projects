@@ -1,0 +1,83 @@
+.yhteytta-container {
+  width: 60%;
+  max-width: 60%;
+  margin: 2rem auto;
+  padding: 1.5rem 2rem;
+  color: #333;
+  font-family: var(--your-global-font, serif);
+}
+
+.yhteytta-title {
+  font-size: clamp(2rem, 4vw, 2.8rem);
+  text-align: center;
+  margin-bottom: 2rem;
+  font-weight: 700;
+}
+
+.yhteytta-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+  width: 100%;
+}
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+}
+
+label {
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+  font-size: 1.1rem;
+  color: #444;
+}
+
+input[type="text"],
+input[type="email"],
+textarea {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0.75rem 1rem;
+  font-size: clamp(1rem, 1.5vw, 1.2rem);
+  border: 2px solid #bbb;
+  border-radius: 8px;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  font-family: var(--your-global-font, serif);
+  resize: vertical;
+  margin: 0 auto;
+}
+
+input[type="text"]:focus,
+input[type="email"]:focus,
+textarea:focus {
+  border-color: #7a5af8;
+  box-shadow: 0 0 8px rgba(122, 90, 248, 0.4);
+  outline: none;
+}
+
+.submit-btn {
+  padding: 0.75rem 1.5rem;
+  font-size: 1.2rem;
+  background-color: #0f3d3e;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 700;
+  align-self: center;
+  width: 180px;
+  transition: background-color 0.3s ease;
+}
+
+.submit-btn:hover {
+  background-color: #593fcc;
+}
+
+.submit-status {
+  margin-top: 1rem;
+  text-align: center;
+  font-weight: 600;
+  color: #555;
+}
